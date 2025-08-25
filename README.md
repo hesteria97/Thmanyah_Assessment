@@ -7,41 +7,39 @@ This is the minimal, copy‑pasteable guide to run and verify the stack. Keep it
 ## Architecture
 
 flowchart LR
-  classDef kafka fill:#f1f8ff,stroke:#0366d6,color:#000;
-
-  subgraph PG[PostgreSQL]
-    A[content]
-    B[engagement_events]
+  subgraph Source_DB[Source_DB]
+    PG[(PostgreSQL)]
   end
 
-  subgraph Debezium[Kafka Connect + Debezium PG]
-    C[CDC Source: pg.public.engagement_events]
+  subgraph Change_Data_Capture[Change_Data_Capture]
+    DBZM[Debezium PG Connector]
   end
 
-  subgraph RP[Redpanda (Kafka)]
-    RP1[(Kafka)]
-    RP2[(Kafka)]
-    class RP2 kafka
+  subgraph Event_Bus[Event_Bus]
+    RP[Redpanda/Kafka]
   end
 
-  subgraph Flink[Flink SQL]
-    F[Join, derive, compute]
+  subgraph Stream_Enrichment[Stream_Enrichment]
+    FLINK[Flink SQL Job]
   end
 
-  subgraph Sinks[Fan-out Sinks]
-    CH[ClickHouse<br/>thm.enriched_events]
-    RD[Redis<br/>thm:top:10m ZSET]
-    EXT[External HTTP API]
+  subgraph Fan_out_Sinks[Fan_out_Sinks]
+    CH[(ClickHouse)]
+    RDS[(Redis)]
+    EXT[(External API)]
   end
 
-  A -->|dimension lookup| F
-  B -->|WAL logical decode| C
-  C -->|pg.public.engagement_events| RP1
-  RP1 --> F
-  F -->|thm.enriched.events| RP2
-  RP2 --> CH
-  RP2 --> RD
-  RP2 --> EXT
+  subgraph Orchestration[Orchestration]
+    AF[Airflow_SQlite]
+  end
+
+  PG --> DBZM --> RP
+  RP --> FLINK -->|enriched events| RP
+  RP -->|enriched events| CH
+  RP -->|enriched events| RDS
+  RP -->|enriched events| EXT
+  AF -->|bootstrap + register connectors| DBZM
+  AF -->|create DB/table + register sink| CH
 
 
 ## Contents

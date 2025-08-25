@@ -298,3 +298,302 @@ Use **service names** with `docker compose`, and container names with `docker lo
 | `postgres`          | `postgres`         |
 | `redis`             | `redis`            |
 | `airflow`           | `airflow`          |
+
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# مكدس التوزيع (Fan‑Out) لِـ Thamanya
+
+خط معالجة أحداث آني ينقل تغييرات PostgreSQL إلى ثلاث وجهات: ClickHouse وRedis وواجهة HTTP خارجية، مع إثراء عبر Flink SQL وقراءة تغيّرات (CDC) بواسطة Debezium.
+
+- **المصدر:** PostgreSQL (جدولا `content` و`engagement_events`)
+- **CDC → كافكا:** Debezium ضمن Kafka Connect
+- **الوسيط:** Redpanda (متوافق مع Kafka API)
+- **المعالجة:** Flink SQL (ربط + اشتقاق + تحويل)
+- **المخارج:** ClickHouse للتحليلات، Redis للترتيب الفوري، وواجهة HTTP خارجية (تجريبية)
+- **الأتمتة:** Airflow (مهام تمهيدية اختيارية)
+- **حِمل اصطناعي:** مولّد أحداث (بايثون)
+
+## المعمارية
+
+```mermaid
+flowchart LR
+  classDef kafka fill:#f1f8ff,stroke:#0366d6,color:#000;
+
+  subgraph PG[PostgreSQL]
+    A[content]
+    B[engagement_events]
+  end
+
+  subgraph Debezium[Kafka Connect + Debezium PG]
+    C[CDC Source: pg.public.engagement_events]
+  end
+
+  subgraph RP[Redpanda Kafka]
+    RP1[(Kafka)]
+    RP2[(Kafka)]
+    class RP2 kafka
+  end
+
+  subgraph Flink[Flink SQL]
+    F[Join, derive, compute]
+  end
+
+  subgraph Sinks[Fan-out Sinks]
+    CH[ClickHouse<br/>thm.enriched_events]
+    RD[Redis<br/>thm:top:10m ZSET]
+    EXT[External HTTP API]
+  end
+
+  A -->|dimension lookup| F
+  B -->|WAL logical decode| C
+  C -->|pg.public.engagement_events| RP1
+  RP1 --> F
+  F -->|thm.enriched.events| RP2
+  RP2 --> CH
+  RP2 --> RD
+  RP2 --> EXT
+```
+
+## نموذج البيانات
+
+**PostgreSQL**
+
+- `content(id, slug, title, content_type, length_seconds, publish_ts)`
+- `engagement_events(id, content_id, user_id, event_type, event_ts, duration_ms, device, raw_payload)`
+
+**الإثراء**
+
+- `engagement_seconds = duration_ms / 1000`
+- `engagement_pct = (engagement_seconds / length_seconds) * 100` (تكون NULL عند نقص المدخلات)
+
+**مواضيع كافكا (Kafka Topics)**
+
+- `pg.public.engagement_events` بتنسيق Debezium JSON وتدفّق تغييرات
+- `thm.enriched.events` باستخدام `upsert-kafka` والمفتاح الأساسي = `id`
+
+**ClickHouse**
+
+- جدول `thm.enriched_events` من نوع ReplacingMergeTree بترتيب `(event_ts, id)`
+
+**Redis**
+
+- مجموعة مرتّبة ZSET لأفضل المحتويات خلال آخر 10 دقائق: `thm:top:10m`  
+  سياسة التسجيل: تشغيل/إنهاء = +1.0، النقر = +0.2، الإيقاف المؤقت = 0
+
+## بنية المستودع
+
+```
+.
+├─ docker-compose.yml
+├─ fix_all.sh                       # اختبار سريع: تهيئة مخرج CH + عينتان + فحص Redis
+├─ db/
+│  └─ init/                         # مخطط Postgres وبيانات تمهيدية
+├─ connectors/
+│  ├─ install-clickhouse-plugin.sh  # مُثبّت آمن لإضافة مخرج ClickHouse لـ Kafka Connect
+│  └─ clickhouse-kc/                # مجلد الإضافة (يُملأ أثناء التشغيل)
+├─ flink/
+│  └─ sql/
+│     ├─ download_flink_jars.sh     # تنزيل موصلات Flink (kafka, jdbc, json, postgres)
+│     ├─ run-sql.sh                 # ينتظر مدير الوظائف ثم يرسل SQL
+│     └─ 01_enrich.sql              # المصدر + جدول lookup + المخرج + INSERT
+├─ generator/
+│  └─ generator.py                  # يُدرج صفوف تفاعل عشوائية في Postgres
+├─ consumers/
+│  ├─ requirements.txt
+│  ├─ redis_agg.py                  # يستهلك الموضوع المُثري لتحديث Redis
+│  └─ http_sink.py                  # يستهلك الموضوع المُثري ويرسل POST إلى واجهة HTTP خارجية
+├─ external/
+│  └─ app.py                        # تطبيق Flask بسيط لاستقبال الأحداث
+└─ airflow/
+   ├─ entrypoint-sqlite.sh          # نقطة تشغيل Airflow مع SQLite
+   └─ dags/
+      ├─ thamanya_bootstrap.py      # DAG تمهيدي اختياري
+      └─ resources/
+         ├─ clickhouse.create_table.sql
+         ├─ pg-engagement-source.json
+         └─ clickhouse-sink.json
+```
+
+## المتطلبات
+
+- Docker Engine + Docker Compose v2
+- نحو 4 جيجابايت ذاكرة متاحة للحاويات
+- منافذ متاحة:
+  - Postgres: 5432
+  - Redpanda: 9092 (ومنفذ خارجي 19092)
+  - ClickHouse: 8123
+  - Flink: 8081
+  - Airflow: 8080
+  - External API: ‏8088
+- أدوات اختيارية: `jq` و`curl` و`rpk` (موجودة داخل حاوية Redpanda)
+
+## البدء السريع
+
+```bash
+docker compose up -d
+# انتظر حوالي 30–60 ثانية لفحوصات الصحة
+./fix_all.sh   # اختبار: إنشاء مخرج CH، توليد عينتين، عدّ CH + أفضل 10 في Redis
+```
+
+### روابط الخدمات
+
+- لوحة Flink: http://localhost:8081
+- واجهة Airflow: http://localhost:8080  (المستخدم: `airflow`، كلمة المرور: `airflow`)
+- واجهة التجربة الخارجية: http://localhost:8088/
+
+### ما يبدأ تلقائياً
+
+- **Postgres** مع المخطط والبيانات التمهيدية
+- **Redpanda** كوسيط رسائل
+- **Kafka Connect** مع إضافة Debezium لمصدر PG ومُثبّت إضافة مخرج ClickHouse
+- **Flink JM/TM** وعميل **flink-sql-runner** لتنزيل موصلات SQL وإرسال المهمة
+- **مولّد الأحداث** يُدرج صفاً عشوائياً كل 5 ثوانٍ
+- **مجمّع Redis** و**مخرج HTTP** يستهلكان `thm.enriched.events`
+- **Airflow** يعمل (SQLite) مع DAG اختياري لإنشاء جدول CH وتسجيل الموصلات
+
+> لتسجيل المصدر والمخرج عبر Airflow بدلاً من `fix_all.sh`:
+>
+> ```bash
+> docker exec -it airflow airflow dags trigger thamanya_bootstrap
+> ```
+
+## قائمة تحقق التحقق
+
+```bash
+# 1) مهمة Flink موجودة وحالتها RUNNING
+curl -s http://localhost:8081/jobs | jq .
+
+# 2) موصل Debezium يعمل
+curl -s http://localhost:8083/connectors/pg.engagement.source/status | jq '.connector.state,.tasks[].state'
+
+# 3) موضوع Kafka المُثري يحوي رسائل
+docker exec -it redpanda rpk topic consume thm.enriched.events -n 3 --brokers redpanda:9092
+
+# 4) عداد صفوف ClickHouse يزداد
+curl -s 'http://localhost:8123/?query=SELECT%20count()%20FROM%20thm.enriched_events'; echo
+
+# 5) لوحة المتصدرين لـ 10 دقائق في Redis
+docker exec -it redis redis-cli ZREVRANGE thm:top:10m 0 9 WITHSCORES
+
+# 6) الواجهة الخارجية تلقت الطلبات
+docker compose logs --tail=80 external-api http-sink
+```
+
+## ملاحظات تشغيلية
+
+- **Flink SQL (`01_enrich.sql`)**
+  - المصدر يقرأ Debezium JSON من `pg.public.engagement_events`.
+  - جدول البحث `dim_content` جدول **JDBC مؤقت** ضمن نفس جلسة الإدراج.
+  - المخرج يستخدم **`upsert-kafka`** مع `PRIMARY KEY (id)` لقبول تدفّق التغييرات.
+  - يُكتب `event_ts` كسلسلة **STRING** للحفاظ على التوافق بين المخارج.
+- **الدقة مرة واحدة بالضبط:** تم تمكين نقاط التحقق كل 10 ثوانٍ. يمكن تقوية الإعدادات لبيئات الإنتاج.
+- **الملء الرجعي:** فعّل لقطة أولية في Debezium واقرأ من الأقدم. الإعداد الافتراضي هنا هو `scan.startup.mode = earliest-offset`.
+
+## مشكلات شائعة وحلولها
+
+| العرض / السجل                                               | السبب                                   | الحل |
+| --- | --- | --- |
+| `ERROR: logical decoding requires wal_level >= logical` | إعداد WAL في Postgres غير مناسب | نشغّل Postgres مع `wal_level=logical`. أعِد السطر `command:` في `docker-compose.yml` إن كنت غيّرته. |
+| خطأ اتصال الموصل بقاعدة البيانات | لا يصل Kafka Connect إلى Postgres | تحقّق من صحة وتشغيل خدمة `postgres` ومن بيانات الاعتماد في `pg-engagement-source.json`. |
+| لم يُعثر على إضافة مخرج ClickHouse | فشل التثبيت أو صلاحيات | يعمل المثبّت قبل إقلاع Connect ويضع الإضافة في `/kafka/connect/clickhouse-kc`. أعد تشغيل Connect وتحقق من `:8083/connector-plugins`. |
+| `Flink distribution jar not found...` | صورة Flink تفتقد بعض المكتبات | تُنَزّل سكربتات `download_flink_jars.sh` الموصلات عند الإقلاع. تحقّق من اتصال الشبكة أو شغّل السكربت يدوياً داخل الحاوية. |
+| `Unsupported type: TIMESTAMP_LTZ(3)` | عدم توافق نوع الوقت مع JSON | استخدم `TIMESTAMP(3)` في المصدر وحوّل إلى `STRING` في المخرج. |
+| `Table sink ... doesn't support consuming update and delete changes` | مخرج `kafka` العادي لا يدعم تغييرات upsert | استخدم **`upsert-kafka`** مع مفتاح أساسي كما في `01_enrich.sql`. |
+| لوحة متصدرين Redis فارغة | مجموعة المستهلك متوقفة أو لا توجد رسائل | افحص سجلات `redis-agg`، ثم صفّر مجموعة المستهلك وأعد التشغيل، وأرسل سجلاً اختبارياً. |
+| `UnsupportedCodecError: Libraries for snappy` | رسائل Kafka مضغوطة | ثبّت `python-snappy` و`lz4` ضمن الصورة التي تشغّل المستهلكين. |
+| `mv ... are the same file` في مُثبّت Connect | تسوية ملفات مبالغ فيها | المُثبّت الحالي متسامح ومُعاد الدخول. استخدم السكربت المرفق فقط. |
+
+## تحكم يدوي
+
+### تشغيل/إيقاف خدمات بعينها
+
+```bash
+docker compose up -d postgres redpanda connect clickhouse redis
+docker compose up -d flink-jobmanager flink-taskmanager flink-sql-runner
+docker compose up -d event-generator redis-agg http-sink external-api airflow
+
+docker compose stop
+docker compose down -v   # تنظيف كامل (الأحجام)
+```
+
+### تشغيل مهمة Flink يدوياً عند الحاجة
+
+```bash
+docker exec -it flink-jm bash -lc '
+  bash /opt/flink/sql/download_flink_jars.sh &&
+  /opt/flink/bin/sql-client.sh -f /opt/flink/sql/01_enrich.sql
+'
+```
+
+### فحص Kafka
+
+```bash
+docker exec -it redpanda rpk topic list --brokers redpanda:9092
+docker exec -it redpanda rpk topic describe thm.enriched.events --brokers redpanda:9092
+docker exec -it redpanda rpk topic consume thm.enriched.events -n 5 --brokers redpanda:9092
+```
+
+### الاستعلام عن ClickHouse
+
+```bash
+curl -s 'http://localhost:8123/?query=SELECT%20count()%20FROM%20thm.enriched_events'; echo
+curl -s 'http://localhost:8123/?query=SELECT%20content_id,%20count()%20FROM%20thm.enriched_events%20GROUP%20BY%201%20ORDER%20BY%202%20DESC%20LIMIT%205' | column -t
+```
+
+### لوحة المتصدرين في Redis
+
+```bash
+docker exec -it redis redis-cli ZREVRANGE thm:top:10m 0 9 WITHSCORES
+```
+
+## Airflow (اختياري)
+
+- اسم الـ DAG: `thamanya_bootstrap`
+  - `clickhouse_create_db` و`clickhouse_create_table`
+  - `register_debezium_source` (طلب POST إلى Connect)
+  - `register_clickhouse_sink` (طلب POST إلى Connect)
+- للتشغيل اليدوي:
+  ```bash
+  docker exec -it airflow airflow dags trigger thamanya_bootstrap
+  ```
+
+## التوسعة والتقسية
+
+- **تطوّر المخطط:** فعّل مواضيع تغيّر المخططات في Debezium وتعامل معها في Flink.
+- **دقة طرفية قوية:** اضبط نقاط التحقق وخصائص المعاملات في Kafka لوضع الإنتاج.
+- **ملء رجعي:** أعد إنشاء موصل المصدر للالتقاط الأولي وأعد تعيين الإزاحات، واقرأ من الأقدم.
+- **الرصد:** أضف Grafana/Prometheus لمقاييس الوسيط وFlink، ومؤشرات صحة REST لـ Kafka Connect.
+
+## أسماء الخدمات مقابل أسماء الحاويات
+
+استخدم **أسماء الخدمات** مع `docker compose`، وأسماء الحاويات مع `docker logs`.
+
+| الخدمة              | اسم الحاوية        |
+| --- | --- |
+| `flink-jobmanager`  | `flink-jm`         |
+| `flink-taskmanager` | `flink-tm`         |
+| `flink-sql-runner`  | `flink-sql-runner` |
+| `connect`           | `connect`          |
+| `redpanda`          | `redpanda`         |
+| `clickhouse`        | `clickhouse`       |
+| `postgres`          | `postgres`         |
+| `redis`             | `redis`            |
+| `airflow`           | `airflow`          |
+
+وشكرا،،،
+
+
+
+
+
+
+
+
+
+
+
+
+

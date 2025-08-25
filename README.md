@@ -6,42 +6,48 @@ This is the minimal, copy‑pasteable guide to run and verify the stack. Keep it
 
 ## Architecture
 
-```mermaid
 flowchart LR
-  subgraph PG[PostgreSQL]
-    A[content]
-    B[engagement_events]
-  end
 
-  subgraph Debezium[Kafka Connect + Debezium PG]
-    C[CDC Source: pg.public.engagement_events]
-  end
 
-  A -->|dim lookup| F
-  B -->|WAL logical decode| C
+%% === Subgraphs ===
+subgraph PG[PostgreSQL]
+CONTENT[content]
+EVENTS[engagement_events]
+end
 
-  subgraph RP[Redpanda (Kafka)]
-    C -->|topic: pg.public.engagement_events| RP1[(Kafka)]
-    RP2[(Kafka)]:::kafka
-  end
-  classDef kafka fill:#f1f8ff,stroke:#0366d6,color:#000;
 
-  subgraph Flink[Flink SQL]
-    F[Join, derive, compute]
-    RP1 --> F
-    F -->|topic: thm.enriched.events| RP2
-  end
+subgraph CONNECT[Kafka Connect / Debezium]
+DEB[Debezium PG Source]
+end
 
-  subgraph Sinks[Fan‑out Sinks]
-    CH[ClickHouse\nthm.enriched_events]
-    RD[Redis\nthm:top:10m ZSET]
-    EXT[External HTTP API]
-  end
 
-  RP2 --> CH
-  RP2 --> RD
-  RP2 --> EXT
-```
+subgraph KAFKA[Redpanda (Kafka)]
+TOPIC1[(pg.public.engagement_events)]
+TOPIC2[(thm.enriched.events)]
+end
+
+
+subgraph FLINK[Flink SQL]
+JOB[Enrich + join]
+end
+
+
+subgraph SINKS[Fan-out Sinks]
+CH[ClickHouse: thm.enriched_events]
+RD[Redis: thm:top:10m]
+EXT[External HTTP API]
+end
+
+
+%% === Edges ===
+EVENTS --> DEB
+DEB --> TOPIC1
+TOPIC1 --> JOB
+CONTENT --> JOB
+JOB --> TOPIC2
+TOPIC2 --> CH
+TOPIC2 --> RD
+TOPIC2 --> EXT
 
 ## Contents
 

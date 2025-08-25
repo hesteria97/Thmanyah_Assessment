@@ -1,0 +1,19 @@
+{
+  "name": "clickhouse.sink.enriched",
+  "config": {
+    "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+    "tasks.max": "1",
+    "topics": "thm.enriched.events",
+    "topic2TableMap": "thm.enriched.events=enriched_events",
+    "hostname": "clickhouse",
+    "port": "8123",
+    "ssl": "false",
+    "database": "thm",
+    "username": "default",
+    "password": "",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "clickhouseSettings": "date_time_input_format=best_effort",
+    "errors.tolerance": "none"
+  }
+}

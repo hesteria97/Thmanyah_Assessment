@@ -1,0 +1,5 @@
+kafka-python==2.0.2
+redis==5.0.8
+requests==2.32.3
+python-snappy==0.7.3
+lz4==4.3.3

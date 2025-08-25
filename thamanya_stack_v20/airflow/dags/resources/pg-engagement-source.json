@@ -1,0 +1,21 @@
+{
+  "name": "pg.engagement.source",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "app",
+    "database.password": "app",
+    "database.dbname": "thm",
+    "topic.prefix": "pg",
+    "publication.autocreate.mode": "filtered",
+    "table.include.list": "public.engagement_events,public.content",
+    "include.schema.changes": "false",
+    "tombstones.on.delete": "false",
+    "schema.include.list": "public",
+    "plugin.name": "pgoutput",
+    "decimal.handling.mode": "double",
+    "key.converter.schemas.enable": "false",
+    "value.converter.schemas.enable": "false"
+  }
+}

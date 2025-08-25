@@ -1,0 +1,248 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    hostname: postgres
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: thm
+    ports: ["5432:5432"]
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d
+    command: ["postgres","-c","wal_level=logical","-c","max_wal_senders=20","-c","max_replication_slots=20"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d thm"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redpanda:
+    image: redpandadata/redpanda:v24.1.8
+    container_name: redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+    ports: ["9092:9092","19092:19092"]
+    healthcheck:
+      test: ["CMD-SHELL","rpk cluster info --brokers localhost:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  connect:
+    image: quay.io/debezium/connect:2.7.3.Final
+    container_name: connect
+    user: "0:0"
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: "1"
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_status
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      PLUGIN_PATH: /kafka/connect,/debezium
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx768m"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports: ["8083:8083"]
+    volumes:
+      - ./connectors:/connectors
+      - ./connectors/clickhouse-kc:/kafka/connect/clickhouse-kc
+      - ./connectors/install-clickhouse-plugin.sh:/usr/local/bin/install-clickhouse-plugin.sh:ro
+    entrypoint: ["/bin/bash","-lc","bash /usr/local/bin/install-clickhouse-plugin.sh && exec /docker-entrypoint.sh start"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8083/connector-plugins | grep -q com.clickhouse.kafka.connect.ClickHouseSinkConnector"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.5
+    container_name: clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    ports: ["8123:8123","9000:9000"]
+    healthcheck:
+      test: ["CMD-SHELL","clickhouse-client -q 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  redis:
+    image: redis:7
+    container_name: redis
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD","redis-cli","PING"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  flink-jobmanager:
+    image: flink:1.18.1-scala_2.12
+    container_name: flink-jm
+    command: >
+      /bin/bash -lc "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl);
+      bash /opt/flink/sql/download_flink_jars.sh && exec /docker-entrypoint.sh jobmanager"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jm
+        state.backend: filesystem
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 10s
+        parallelism.default: 1
+    ports: ["8081:8081"]
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    volumes:
+      - ./flink/sql:/opt/flink/sql
+    healthcheck:
+      test: ["CMD-SHELL","curl -fsS http://localhost:8081/jobs >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  flink-taskmanager:
+    image: flink:1.18.1-scala_2.12
+    container_name: flink-tm
+    command: >
+      /bin/bash -lc "command -v curl >/dev/null 2>&1 || (apt-get update && apt-get install -y curl);
+      bash /opt/flink/sql/download_flink_jars.sh && exec /docker-entrypoint.sh taskmanager"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jm
+        taskmanager.numberOfTaskSlots: 2
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./flink/sql:/opt/flink/sql
+
+  flink-sql-runner:
+    image: flink:1.18.1-scala_2.12
+    container_name: flink-sql-runner
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./flink/sql:/opt/flink/sql
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jm
+        parallelism.default: 1
+    entrypoint: ["/bin/bash","-lc","/opt/flink/sql/run-sql.sh"]
+
+  event-generator:
+    image: python:3.11-slim
+    container_name: event-generator
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGDATABASE: thm
+      PGUSER: app
+      PGPASSWORD: app
+    working_dir: /app
+    volumes:
+      - ./generator:/app
+    command: >
+      sh -c "pip install --no-cache-dir psycopg2-binary && python -u generator.py"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis-agg:
+    image: python:3.11-slim
+    container_name: redis-agg
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      REDIS_HOST: redis
+    working_dir: /app
+    volumes:
+      - ./consumers:/app
+    command: >
+      sh -c "apt-get update &&
+             apt-get install -y --no-install-recommends libsnappy1v5 &&
+             rm -rf /var/lib/apt/lists/* &&
+             pip install --no-cache-dir -r requirements.txt &&
+             python -u redis_agg.py"
+
+  http-sink:
+    image: python:3.11-slim
+    container_name: http-sink
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      external-api:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: redpanda:9092
+      REDIS_HOST: redis
+      EXTERNAL_ENDPOINT: "http://external-api:8088/events"
+    working_dir: /app
+    volumes:
+      - ./consumers:/app
+    command: >
+      sh -c "apt-get update &&
+             apt-get install -y --no-install-recommends libsnappy1v5 &&
+             rm -rf /var/lib/apt/lists/* &&
+             pip install --no-cache-dir -r requirements.txt &&
+             python -u http_sink.py"
+
+  external-api:
+    image: python:3.11-slim
+    container_name: external-api
+    working_dir: /srv
+    volumes:
+      - ./external:/srv
+    command: >
+      sh -c "pip install --no-cache-dir flask gunicorn &&
+             gunicorn -b 0.0.0.0:8088 app:app"
+    ports: ["8088:8088"]
+
+  airflow:
+    image: apache/airflow:2.9.3
+    container_name: airflow
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__WEBSERVER__SECRET_KEY: "thm-secret"
+      AIRFLOW_CONN_CLICKHOUSE_HTTP: "http://clickhouse:8123/"
+      AIRFLOW_CONN_CONNECT_HTTP: "http://connect:8083/"
+    ports: ["8080:8080"]
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/entrypoint-sqlite.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/bash","/entrypoint.sh"]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      connect:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy

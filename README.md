@@ -132,6 +132,14 @@ flowchart LR
 ```bash
 docker compose up -d
 # wait ~30–60s for healthchecks
+Open Airflow: `http://localhost:8080` (user `airflow`, password `airflow`)
+ Trigger the DAG: `thamanya_bootstrap`
+ Tasks run in order:
+   - `clickhouse_create_db`
+   - `clickhouse_create_table`
+   - `wait_for_clickhouse_sink_plugin`
+   - `register_debezium_source`
+   - `register_clickhouse_sink`
 ./fix_all.sh   # smoke test: create CH sink, produce 2 sample events, CH count + Redis top‑10
 ```
 
@@ -141,15 +149,15 @@ docker compose up -d
 
 **Order of operations:**
 1. Start the stack: `docker compose up -d`
-2. Smoke test: `./fix_all.sh`
-3. Open Airflow: `http://localhost:8080` (user `airflow`, password `airflow`)
-4. Trigger the DAG: `thamanya_bootstrap`
-5. Tasks run in order:
+2. Open Airflow: `http://localhost:8080` (user `airflow`, password `airflow`)
+3. Trigger the DAG: `thamanya_bootstrap`
+4. Tasks run in order:
    - `clickhouse_create_db`
    - `clickhouse_create_table`
    - `wait_for_clickhouse_sink_plugin`
    - `register_debezium_source`
    - `register_clickhouse_sink`
+5. Smoke test: `./fix_all.sh`     
 
 ### Service URLs
 
@@ -430,12 +438,21 @@ flowchart LR
   - External API: ‏8088
 - أدوات اختيارية: `jq` و`curl` و`rpk` (موجودة داخل حاوية Redpanda)
 
+
 ## البدء السريع
 
 ```bash
 docker compose up -d
-# انتظر حوالي 30–60 ثانية لفحوصات الصحة
-./fix_all.sh   # اختبار: إنشاء مخرج CH، توليد عينتين، عدّ CH + أفضل 10 في Redis
+# انتظر ~30–60 ثانية لاكتمال فحوصات الصحة
+# افتح Airflow: http://localhost:8080  (المستخدم: airflow، كلمة المرور: airflow)
+# فعّل الـ DAG: thamanya_bootstrap
+# المهام تُنفّذ بالترتيب:
+#   - clickhouse_create_db
+#   - clickhouse_create_table
+#   - wait_for_clickhouse_sink_plugin
+#   - register_debezium_source
+#   - register_clickhouse_sink
+./fix_all.sh   # اختبار سريع: إنشاء مخرج ClickHouse، إنتاج سجلين، فحص عدّ ClickHouse ولوحة Redis لأفضل 10
 ```
 
 ### روابط الخدمات

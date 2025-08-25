@@ -27,7 +27,7 @@ flowchart LR
     C[CDC Source: pg.public.engagement_events]
   end
 
-  subgraph RP[Redpanda (Kafka)]
+  subgraph RP[Redpanda Kafka]
     RP1[(Kafka)]
     RP2[(Kafka)]
     class RP2 kafka

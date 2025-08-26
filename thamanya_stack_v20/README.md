@@ -16,10 +16,30 @@ This file is the minimal, copy-pasteable guide to run and verify the stack. Keep
 5. Useful commands
 
 6. Troubleshooting (fast)
+   
+---
+
+#################  Quick Start  ###########
+
+Order of operations:
+1. Start the stack: `docker compose up -d`
+2. Open Airflow: `http://localhost:8080` (user `airflow`, password `airflow`)
+3. Trigger the DAG: `thamanya_bootstrap`
+4. Tasks run in order:
+   - `clickhouse_create_db`
+   - `clickhouse_create_table`
+   - `wait_for_clickhouse_sink_plugin`
+   - `register_debezium_source`
+   - `register_clickhouse_sink`
+5. Smoke test: `./fix_all.sh`
 
 
 
 ---
+
+
+
+
 
 * Docker Engine + Docker Compose v2
 * \~4 GB free RAM

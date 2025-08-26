@@ -21,7 +21,7 @@ This file is the minimal, copy-pasteable guide to run and verify the stack. Keep
 
 #################  Quick Start  ###########
 
-you can ref to Guide_pic (./Guide_pic)
+![Thamanya Quickstart guide](./Guide_pic)
 
 Order of operations:
 1. Start the stack: `docker compose up -d`
